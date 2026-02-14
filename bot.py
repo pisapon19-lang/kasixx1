@@ -14,7 +14,7 @@ import time
 import threading
 
 # Токен из переменных окружения
-TOKEN = os.environ.get('8294429332:AAHDw84FkyZ-EOHIXynS0YdgYRkLcjI8eK4')
+TOKEN = "8294429332:AAHam3zIX2z3Anz5gVUSjLdUP8ZXz2-0M3c"
 URL = "https://web.max.ru"
 
 logging.basicConfig(level=logging.INFO)
