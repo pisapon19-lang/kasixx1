@@ -9,6 +9,7 @@ from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMark
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
 import os
 import time
 import threading
