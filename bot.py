@@ -16,7 +16,7 @@ import os
 import time
 
 # Токен из переменных окружения
-TOKEN = os.environ.get('TOKEN', '8294429332:AAHam3zIX2z3Anz5gVUSjLdUP8ZXz2-0M3c')
+TOKEN = os.environ.get('TOKEN', '8294429332:AAEQsLd2ZnGM0Z12arZjQZmVK38X1-tJEXY')
 URL = "https://web.max.ru"
 
 logging.basicConfig(level=logging.INFO)
