@@ -14,7 +14,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import os
 import time
-
+ывфапронкрепк
 # Токен из переменных окружения
 TOKEN = os.environ.get('TOKEN', '8294429332:AAHam3zIX2z3Anz5gVUSjLdUP8ZXz2-0M3c')
 URL = "https://web.max.ru"
