@@ -1,5 +1,5 @@
 """
-Telegram бот: QR-код → ожидание входа → выполнение команды → результат
+Telegram бот для max.ru
 """
 
 import logging
@@ -9,13 +9,14 @@ from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMark
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
+from selenium.webdriver.common.by import By  # 👈 ВАЖНО!
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 import os
 import time
-import threading
 
 # Токен из переменных окружения
-TOKEN = "8294429332:AAHam3zIX2z3Anz5gVUSjLdUP8ZXz2-0M3c"
+TOKEN = os.environ.get('TOKEN', '8294429332:AAHam3zIX2z3Anz5gVUSjLdUP8ZXz2-0M3c')
 URL = "https://web.max.ru"
 
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +36,7 @@ def get_driver():
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-gpu')
         chrome_options.add_argument('--window-size=1920x1080')
+        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         driver = webdriver.Chrome(options=chrome_options)
     return driver
 
