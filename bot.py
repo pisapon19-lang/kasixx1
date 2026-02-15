@@ -1,5 +1,5 @@
 """
-Telegram бот для max.ru - ИСПРАВЛЕННАЯ ВЕРСИЯ
+Telegram бот для max.ru - ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ
 """
 
 import logging
@@ -10,8 +10,6 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 import os
 import time
 
@@ -21,9 +19,6 @@ URL = "https://web.max.ru"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Хранилище сессий пользователей
-user_sessions = {}
 
 driver = None
 
@@ -40,265 +35,142 @@ def get_driver():
         driver = webdriver.Chrome(options=chrome_options)
     return driver
 
-def get_qr_code_screenshot():
-    """Находит QR-код и делает скриншот"""
-    global driver
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Диагностическая команда - показывает все элементы на странице"""
+    msg = await update.message.reply_text("🔍 Анализирую страницу...")
     
     try:
-        # Пробуем найти SVG элементы
-        svg_elements = driver.find_elements(By.TAG_NAME, "svg")
-        logger.info(f"Найдено SVG: {len(svg_elements)}")
+        driver = get_driver()
+        driver.get(URL)
+        time.sleep(10)
         
-        # Пробуем каждый SVG
+        # Собираем информацию обо всех элементах
+        debug_info = "📊 **Анализ страницы:**\n\n"
+        
+        # SVG элементы
+        svg_elements = driver.find_elements(By.TAG_NAME, "svg")
+        debug_info += f"**SVG элементов:** {len(svg_elements)}\n"
         for i, svg in enumerate(svg_elements):
+            width = svg.get_attribute("width")
+            height = svg.get_attribute("height")
+            debug_info += f"  {i}: размер {width}x{height}\n"
+        
+        # Canvas элементы
+        canvas_elements = driver.find_elements(By.TAG_NAME, "canvas")
+        debug_info += f"\n**Canvas элементов:** {len(canvas_elements)}\n"
+        for i, canvas in enumerate(canvas_elements):
+            width = canvas.get_attribute("width")
+            height = canvas.get_attribute("height")
+            debug_info += f"  {i}: размер {width}x{height}\n"
+        
+        # Картинки
+        img_elements = driver.find_elements(By.TAG_NAME, "img")
+        debug_info += f"\n**Картинок:** {len(img_elements)}\n"
+        for i, img in enumerate(img_elements):
+            src = img.get_attribute("src")[:50] + "..." if img.get_attribute("src") else "нет src"
+            debug_info += f"  {i}: {src}\n"
+        
+        # Делаем скриншот всей страницы
+        screenshot = driver.get_screenshot_as_png()
+        img_io = BytesIO(screenshot)
+        img_io.name = "page.png"
+        
+        await msg.delete()
+        
+        # Отправляем анализ
+        await update.message.reply_text(debug_info, parse_mode='Markdown')
+        
+        # Отправляем скриншот страницы
+        await update.message.reply_photo(
+            photo=InputFile(img_io, filename="page.png"),
+            caption="📸 Скриншот всей страницы"
+        )
+        
+    except Exception as e:
+        await msg.edit_text(f"❌ Ошибка: {e}")
+
+async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Улучшенная команда получения QR-кода"""
+    msg = await update.message.reply_text("🔄 Ищу QR-код...")
+    
+    try:
+        driver = get_driver()
+        driver.get(URL)
+        time.sleep(10)
+        
+        # Пробуем разные способы найти QR-код
+        
+        # 1. Ищем SVG с реальными размерами
+        svg_elements = driver.find_elements(By.TAG_NAME, "svg")
+        for svg in svg_elements:
             try:
-                # Проверяем размеры
                 width = svg.get_attribute("width")
                 height = svg.get_attribute("height")
-                logger.info(f"SVG {i}: ширина={width}, высота={height}")
                 
-                # Пробуем сделать скриншот
-                if width and height and int(width) > 0 and int(height) > 0:
+                # Пробуем преобразовать в число
+                try:
+                    w = int(width) if width else 0
+                    h = int(height) if height else 0
+                except:
+                    w, h = 0, 0
+                
+                if w > 100 and h > 100:  # QR код обычно 200-300px
                     png = svg.screenshot_as_png
                     if png:
                         img_io = BytesIO(png)
                         img_io.name = "qrcode.png"
-                        logger.info(f"QR-код найден в SVG {i}")
-                        return img_io
-            except Exception as e:
-                logger.warning(f"Не удалось сделать скриншот SVG {i}: {e}")
+                        await msg.delete()
+                        await update.message.reply_photo(
+                            photo=InputFile(img_io, filename="qrcode.png"),
+                            caption="✅ QR-код найден (SVG)"
+                        )
+                        return
+            except:
                 continue
         
-        # Если SVG не подошли, ищем canvas
+        # 2. Ищем canvas
         canvas_elements = driver.find_elements(By.TAG_NAME, "canvas")
-        logger.info(f"Найдено canvas: {len(canvas_elements)}")
-        
-        for i, canvas in enumerate(canvas_elements):
+        for canvas in canvas_elements:
             try:
-                png = canvas.screenshot_as_png
-                if png:
-                    img_io = BytesIO(png)
-                    img_io.name = "qrcode.png"
-                    logger.info(f"QR-код найден в canvas {i}")
-                    return img_io
-            except Exception as e:
-                logger.warning(f"Не удалось сделать скриншот canvas {i}: {e}")
+                width = canvas.get_attribute("width")
+                height = canvas.get_attribute("height")
+                
+                if width and height and int(width) > 100 and int(height) > 100:
+                    png = canvas.screenshot_as_png
+                    if png:
+                        img_io = BytesIO(png)
+                        img_io.name = "qrcode.png"
+                        await msg.delete()
+                        await update.message.reply_photo(
+                            photo=InputFile(img_io, filename="qrcode.png"),
+                            caption="✅ QR-код найден (Canvas)"
+                        )
+                        return
+            except:
                 continue
         
-        # Если ничего не нашли, делаем скриншот всей страницы
-        logger.info("Делаю полный скриншот страницы")
+        # 3. Если ничего не нашли, показываем скриншот страницы
         screenshot = driver.get_screenshot_as_png()
         img_io = BytesIO(screenshot)
         img_io.name = "page.png"
-        return img_io
         
-    except Exception as e:
-        logger.error(f"Ошибка получения скриншота: {e}")
-        return None
-
-def check_authorization():
-    """Проверяет, выполнен ли вход на сайт"""
-    global driver
-    
-    try:
-        # Проверяем наличие данных авторизации в localStorage
-        has_auth = driver.execute_script("""
-            let auth = localStorage.getItem('__oneme_auth');
-            let deviceId = localStorage.getItem('__oneme_device_id');
-            return auth !== null && deviceId !== null;
-        """)
-        
-        return has_auth
-    except:
-        return False
-
-def execute_command_and_get_result():
-    """Выполняет команду и возвращает результат"""
-    global driver
-    
-    try:
-        # Ваша команда
-        result = driver.execute_script("""
-            let deviceId = localStorage.getItem('__oneme_device_id');
-            let auth = localStorage.getItem('__oneme_auth');
-            
-            let result = {
-                deviceId: deviceId,
-                auth: auth,
-                timestamp: new Date().toISOString(),
-                userAgent: navigator.userAgent,
-                url: window.location.href
-            };
-            
-            return result;
-        """)
-        
-        return result
-    except Exception as e:
-        logger.error(f"Ошибка выполнения команды: {e}")
-        return None
-
-async def wait_for_login_and_execute(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str):
-    """Ожидает входа и выполняет команду"""
-    global driver
-    
-    try:
-        status_msg = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="🔄 **Ожидание входа в аккаунт...**\n\nПосле сканирования QR-кода и входа, я автоматически выполню команду.",
-            parse_mode='Markdown'
-        )
-        
-        # Ждем входа (проверяем каждые 5 секунд, максимум 3 минуты)
-        max_attempts = 36
-        for attempt in range(max_attempts):
-            await asyncio.sleep(5)
-            
-            if check_authorization():
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=status_msg.message_id,
-                    text="✅ **Вход выполнен!**\n\nВыполняю команду...",
-                    parse_mode='Markdown'
-                )
-                
-                result = execute_command_and_get_result()
-                
-                if result:
-                    result_text = f"""📊 **Результат выполнения команды:**
-
-**Device ID:** `{result.get('deviceId', 'не найден')}`
-
-**Auth:** `{result.get('auth', 'не найден')[:50]}...`
-
-**Время входа:** {result.get('timestamp', '')}
-
-**User Agent:** {result.get('userAgent', '')}
-
-**URL:** {result.get('url', '')}"""
-                    
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=result_text,
-                        parse_mode='Markdown'
-                    )
-                    
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=f"🔑 **Полный auth:**\n`{result.get('auth', '')}`",
-                        parse_mode='Markdown'
-                    )
-                else:
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text="❌ Не удалось выполнить команду"
-                    )
-                
-                if user_id in user_sessions:
-                    del user_sessions[user_id]
-                
-                return
-            
-            if attempt % 6 == 0:
-                remaining = (max_attempts - attempt) * 5
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=status_msg.message_id,
-                    text=f"🔄 **Ожидание входа...**\n\nВремя ожидания: {remaining} секунд",
-                    parse_mode='Markdown'
-                )
-        
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=status_msg.message_id,
-            text="❌ **Время ожидания истекло**\n\nПопробуйте еще раз с командой /qr",
-            parse_mode='Markdown'
+        await msg.delete()
+        await update.message.reply_photo(
+            photo=InputFile(img_io, filename="page.png"),
+            caption="⚠️ QR-код не найден. Вот скриншот страницы.\n\nИспользуйте /debug для анализа."
         )
         
     except Exception as e:
-        logger.error(f"Ошибка в wait_for_login: {e}")
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"❌ Ошибка: {str(e)[:200]}"
-        )
-    finally:
-        if user_id in user_sessions:
-            del user_sessions[user_id]
+        await msg.edit_text(f"❌ Ошибка: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
     await update.message.reply_text(
-        "👋 **Бот для авторизации на max.ru**\n\n"
-        "🔹 **/qr** - получить QR-код и ожидать входа\n"
-        "🔹 После сканирования QR и входа, я автоматически выполню команду\n"
-        "🔹 Результат придет сюда",
-        parse_mode='Markdown'
+        "👋 **Бот для max.ru**\n\n"
+        "🔹 **/qr** - получить QR-код\n"
+        "🔹 **/debug** - диагностика страницы\n"
+        "🔹 **/help** - помощь"
     )
-
-async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение QR-кода и ожидание входа"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id in user_sessions:
-        await update.message.reply_text("⚠️ У вас уже есть активная сессия. Подождите или отмените предыдущую.")
-        return
-    
-    msg = await update.message.reply_text("🔄 **Получаю QR-код...**", parse_mode='Markdown')
-    
-    try:
-        driver = get_driver()
-        
-        # Загружаем страницу
-        logger.info("Загружаю страницу...")
-        driver.get(URL)
-        time.sleep(10)  # Увеличил время загрузки
-        
-        # Получаем QR-код
-        img_io = get_qr_code_screenshot()
-        
-        if img_io:
-            await msg.delete()
-            
-            keyboard = [[InlineKeyboardButton("✅ Я ОТСКАНИРОВАЛ", callback_data="scanned")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_photo(
-                photo=InputFile(img_io, filename="qrcode.png"),
-                caption="📱 **QR-код получен!**\n\n"
-                        "1️⃣ Отсканируйте код\n"
-                        "2️⃣ Подтвердите вход на сайте\n"
-                        "3️⃣ Нажмите кнопку 'Я ОТСКАНИРОВАЛ'",
-                parse_mode='Markdown',
-                reply_markup=reply_markup
-            )
-            
-            user_sessions[user_id] = {
-                'status': 'waiting_qr',
-                'message_id': msg.message_id
-            }
-            
-        else:
-            await msg.edit_text("❌ Не удалось найти QR-код на странице")
-            
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка нажатия кнопки"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = str(update.effective_user.id)
-    
-    if query.data == "scanned":
-        await query.edit_message_caption(
-            caption="✅ **QR-код отсканирован!**\n\n"
-                    "⏳ Ожидаю подтверждения входа на сайте...",
-            parse_mode='Markdown'
-        )
-        
-        asyncio.create_task(wait_for_login_and_execute(update, context, user_id))
 
 async def main():
     """Главная функция"""
@@ -306,13 +178,13 @@ async def main():
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("qr", qr_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(CommandHandler("debug", debug_command))
     
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
     
-    logger.info("✅ Бот запущен!")
+    logger.info("✅ Диагностический бот запущен!")
     
     try:
         while True:
