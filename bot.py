@@ -1,10 +1,10 @@
 """
-Telegram бот для max.ru - ПОДСТАНОВКА ЗНАЧЕНИЙ
+Telegram бот для max.ru - ОТПРАВКА В .TXT ФАЙЛЕ
 """
 
 import logging
 import asyncio
-from io import BytesIO
+from io import BytesIO, StringIO
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, ContextTypes
 from selenium import webdriver
@@ -63,27 +63,30 @@ def get_auth_data():
 
 def format_script(device_id, auth):
     """Форматирует скрипт как в примере"""
-    # Пытаемся распарсить auth если это JSON строка
-    try:
-        auth_data = json.loads(auth) if auth and auth.startswith('{') else auth
-        auth_str = json.dumps(auth_data, ensure_ascii=False) if isinstance(auth_data, dict) else auth
-    except:
-        auth_str = auth
-    
     # Форматируем точно как в примере
-    script = f"sessionStorage.clear();localStorage.clear();localStorage.setItem('__oneme_device_id', '{device_id}');localStorage.setItem('__oneme_auth', '{auth_str}');window.location.reload();"
-    
+    script = f"sessionStorage.clear();localStorage.clear();localStorage.setItem('__oneme_device_id', '{device_id}');localStorage.setItem('__oneme_auth', '{auth}');window.location.reload();"
     return script
+
+def create_txt_file(device_id, auth, script):
+    """Создает txt файл с результатом"""
+    content = f"""{script}"""
+    
+    txt_io = StringIO()
+    txt_io.write(content)
+    txt_io.seek(0)
+    
+    # Конвертируем в BytesIO для отправки
+    bytes_io = BytesIO(txt_io.read().encode('utf-8'))
+    bytes_io.name = "result.txt"
+    
+    return bytes_io
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
     await update.message.reply_text(
-        "👋 **Бот для max.ru**\n\n"
-        "🔹 **/qr** - получить скриншот с QR-кодом\n"
-        "🔹 Отсканируй QR и войди\n"
-        "🔹 **/check** - получить данные и скрипт\n\n"
-        "⚡️ Скрипт будет в нужном формате",
-        parse_mode='Markdown'
+        "👋 Бот для max.ru\n\n"
+        "/qr - получить скриншот\n"
+        "/check - получить результат в .txt"
     )
 
 async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,47 +97,26 @@ async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         driver = get_driver()
-        
-        # Загружаем страницу
-        logger.info("Загружаю страницу...")
         driver.get(URL)
-        
-        # Ждем загрузки
-        await msg.edit_text("⏳ Жду загрузки (15 секунд)...")
         time.sleep(15)
         
-        # Делаем скриншот
-        logger.info("Делаю скриншот...")
         screenshot = driver.get_screenshot_as_png()
         img_io = BytesIO(screenshot)
         img_io.name = "page.png"
         
         await msg.delete()
-        
-        # Отправляем скриншот
         await update.message.reply_photo(
             photo=InputFile(img_io, filename="page.png"),
-            caption="📸 **Скриншот готов**\n\n"
-                    "1️⃣ Найди QR-код на скриншоте\n"
-                    "2️⃣ Отсканируй его\n"
-                    "3️⃣ Войди на сайт\n"
-                    "4️⃣ Напиши **/check**",
-            parse_mode='Markdown'
+            caption="Скриншот готов. Отсканируй QR и напиши /check"
         )
         
-        # Сохраняем сессию
-        user_sessions[user_id] = {
-            'status': 'waiting_scan'
-        }
-        
-        logger.info(f"Скриншот отправлен пользователю {user_id}")
+        user_sessions[user_id] = True
         
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
+        await msg.edit_text(f"❌ Ошибка: {e}")
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверка входа и получение данных"""
+    """Проверка входа и отправка .txt файла"""
     user_id = str(update.effective_user.id)
     
     if user_id not in user_sessions:
@@ -144,76 +126,48 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔄 Проверяю вход...")
     
     try:
-        # Проверяем авторизацию
         if check_authorization():
-            await msg.edit_text("✅ Вход выполнен! Получаю данные...")
-            
-            # Получаем данные
             data = get_auth_data()
             
             if data and data.get('deviceId') and data.get('auth'):
                 device_id = data['deviceId']
                 auth = data['auth']
                 
-                # Форматируем скрипт
+                # Создаем скрипт
                 script = format_script(device_id, auth)
                 
-                # Отправляем результат
-                result_text = f"""📊 **ДАННЫЕ АВТОРИЗАЦИИ:**
-
-**Device ID:**
-`{device_id}`
-
-**Auth:**
-`{auth}`
-
-**ГОТОВЫЙ СКРИПТ:**
-```javascript
-{script}
-```"""
+                # Создаем txt файл
+                txt_file = create_txt_file(device_id, auth, script)
                 
                 await msg.delete()
-                await update.message.reply_text(result_text, parse_mode='Markdown')
                 
-                # Отправляем скрипт отдельно для удобства копирования
-                await update.message.reply_text(
-                    f"📋 **СКОПИРУЙ ЭТОТ СКРИПТ:**\n\n`{script}`",
-                    parse_mode='Markdown'
+                # Отправляем только txt файл
+                await update.message.reply_document(
+                    document=InputFile(txt_file, filename="result.txt")
                 )
                 
-                # Очищаем сессию
                 del user_sessions[user_id]
-                
             else:
-                await msg.edit_text("❌ Не удалось получить данные авторизации")
+                await msg.edit_text("❌ Ошибка получения данных")
         else:
-            await msg.edit_text(
-                "❌ **Вход не выполнен**\n\n"
-                "1️⃣ Убедись что ты отсканировал QR-код\n"
-                "2️⃣ Подтверди вход на сайте\n"
-                "3️⃣ Попробуй **/check** еще раз",
-                parse_mode='Markdown'
-            )
+            await msg.edit_text("❌ Вход не выполнен. Попробуй /check еще раз")
             
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
+        await msg.edit_text(f"❌ Ошибка: {e}")
 
 async def main():
     """Главная функция"""
     app = Application.builder().token(TOKEN).build()
     
-    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("qr", qr_command))
     app.add_handler(CommandHandler("check", check_command))
     
-    # Запускаем бота
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
     
-    logger.info("✅ Бот запущен! Форматирует скрипты как в примере")
+    logger.info("✅ Бот запущен! Отправляет результат в .txt")
     
     try:
         while True:
